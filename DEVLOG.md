@@ -2,6 +2,29 @@
 
 按施工顺序记录每个模块的收尾状态。设计文档负责「要做成什么样」，这里只记「已经做到哪」。
 
+## 2026-11-19 · 第 2 步：图书（部分并入）
+
+**books 表、校验与路由**
+
+- 建 `books` 表：`title`（带索引，搜索用）/ `author` / `isbn` / `desc` / `cover` / `author_bio`
+- 并入五个接口：
+  - `GET /books/` — 分页列表
+  - `GET /books/search?q=` — 按书名或作者模糊搜索
+  - `GET /books/{id}` — 详情，不存在返回 404
+  - `POST /books/` — 新增（`title` / `author` 必填）
+  - `GET /books/ranking` — 榜单占位（第 9 步才做真实榜单）
+- 校验：`bookcreate` / `bookupdate` 开 `extra="forbid"`，书名作者 `min_length=1`；分页响应用 `{items, total}` 包装
+- 本切片**不含**依赖其他表的部分，等对应模块并入时再补回来（以完整工程为准）：
+  - 按题材 / 来源筛选 — 依赖第 3 步
+  - 新增时的分类 / 来源校验 — 依赖第 3 步
+  - `status` 借阅状态（在架 / 借走了）— 依赖第 6 步
+  - `rating` 平均评分 — 依赖第 8 步
+- `models/__init__.py` 与 `Schemas/__init__.py` 只导出已并入的 User / Book；`main.py` 挂 `/auth` 与 `/books` 两组路由
+
+本切片已实测：列表 / 详情 / 404 / 搜索 / 新增（测试数据已清）。
+
+未完待续。
+
 ## 2026-11-19
 
 **用户表 + 接口初步实现**
