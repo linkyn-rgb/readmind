@@ -33,6 +33,11 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
     就是按 OAuth2 密码流发请求的，用它才能在 /docs 里直接点着登录。
     注意表单字段叫 username，但库里对应用的是 account（不是 nickname）。
     """
+    # bcrypt 按字节限 72，超长会在 verify_password 里抛 ValueError → 500。
+    # 这种密码不可能是注册成功的（注册侧已按字节拦），直接按「用户名或密码错误」处理，
+    # 既挡住 500，也不额外暴露信息。
+    if len(form.password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="用户名或密码错误")
     user=db.scalar(select(User).where(User.account==form.username))
     if user is None or not verify_password(form.password,user.password):
         # 账号不存在和密码错误返回同一句：不暴露「这个账号存在」

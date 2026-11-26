@@ -9,7 +9,7 @@
 - status 借阅状态（依赖第 6 步的 borrows 表）
 这三块在对应模块并入时再补回来（补的代码以完整工程为准）。
 """
-from fastapi import APIRouter,HTTPException,Depends,status
+from fastapi import APIRouter,HTTPException,Depends,status,Query
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.database import get_db
@@ -19,8 +19,8 @@ from sqlalchemy import func
 router=APIRouter()
 
 @router.get("/",response_model=listbook)
-def list_book(page:int=1,size:int=20,db:Session=Depends(get_db)):
-    """图书列表：分页。"""
+def list_book(page:int=Query(1,ge=1),size:int=Query(20,ge=1,le=100),db:Session=Depends(get_db)):
+    """图书列表：分页。page / size 走 Query 校验：负数会算出负 offset，MySQL 直接语法错。"""
     stmt = select(Book)
     num = db.scalar(select(func.count()).select_from(stmt.subquery()))   # 总数单独查（分页要用）
     book = db.scalars(stmt.order_by(Book.id).limit(size).offset((page-1)*size)).all()
