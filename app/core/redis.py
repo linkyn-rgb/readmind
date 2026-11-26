@@ -1,8 +1,9 @@
 """Redis 连接（第 9 步）。
 
-这个文件只负责「连接」：连接池、客户端、健康检查、关闭。
-业务读写不在这里 —— 按分工，黑名单的存放 / 删除 / 判断状态、热搜计数、借阅榜
-都写在用它们的路由里。
+这个文件负责两块：连接层（连接池、客户端、健康检查、关闭），
+以及第 9 步的 Redis key 纯命令包装（热搜 / 借阅榜的 +1 / Top N）。
+「什么时候该调、失败了怎么降级」是业务，写在路由里 ——
+黑名单的存放 / 删除 / 状态判断也仍在 auth.py / dep.py。
 
 API 依据：本机安装的 redis-py 8.1.0，用 `inspect.signature` 逐条核对过：
     Redis.from_url(url, **kwargs) -> Redis
@@ -74,3 +75,53 @@ def close() -> None:
     if _pool is not None:
         _pool.disconnect()
         _pool = None
+
+
+# ---------- 热搜 search:hot（9.3） ----------
+
+SEARCH_HOT_KEY = "search:hot"   # 有序集合：member = 搜索词，score = 次数
+
+
+def incr_search_hot(keyword: str) -> None:
+    """热搜 +1。词在写入前统一 strip + lower —— Redis 的 member 区分大小写，
+    不做这一步「Python」和「python」会变成榜上两条。
+
+    不吞 RedisError：Redis 挂了让异常冒回路由，由调用方决定降级
+    （搜索接口不能因为热搜计数失败而 500）。空词直接忽略。
+    """
+    word = keyword.strip().lower()
+    if not word:
+        return
+    get_redis().zincrby(SEARCH_HOT_KEY, 1, word)
+
+
+def top_search_hot(n: int = 10) -> list[tuple[str, float]]:
+    """热搜 Top N：按次数降序，返回 [(词, 次数)]；榜空 / key 不存在时返回 []。
+
+    读失败同样不吞 —— 由路由决定是返回空列表还是别的。
+    """
+    return get_redis().zrange(SEARCH_HOT_KEY, 0, n - 1, desc=True, withscores=True)
+
+
+# ---------- 借阅榜 book:borrow_rank（9.4） ----------
+
+BORROW_RANK_KEY = "book:borrow_rank"   # 有序集合：member = 书 id 的字符串，score = 被借次数
+
+
+def incr_borrow_rank(book_id: int) -> None:
+    """借阅榜 +1。只由「借书成功」调用 —— 续借 / 还书都不算（设计 §7.3）。
+
+    不吞 RedisError：Redis 挂了让异常冒回路由，由调用方决定降级
+    （借书主流程不能因为榜单计数失败而回滚）。
+    """
+    get_redis().zincrby(BORROW_RANK_KEY, 1, str(book_id))
+
+
+def top_borrow_rank(n: int = 20) -> list[tuple[int, float]]:
+    """借阅榜 Top N：按次数降序，返回 [(书 id, 次数)]；榜空 / key 不存在时返回 []。
+
+    Redis 里 member 存的是字符串 id，这里转回 int —— 路由拿去查库时不用再转。
+    读失败不吞，由路由决定返回空榜（9.5 降级口径）。
+    """
+    rows = get_redis().zrange(BORROW_RANK_KEY, 0, n - 1, desc=True, withscores=True)
+    return [(int(member), score) for member, score in rows]

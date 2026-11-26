@@ -1,12 +1,13 @@
 """认证接口（第 3 步）：登录 / 注册 / 登出。
 
-挂载方式见 main.py：同一个 router 被挂了两次（/user 和 /auth），
+挂载方式见 main.py：同一个 router 被挂了两次（/user 和 /auth）
 所以 /auth/login 和 /user/login 都能用，接前端时最好只留一套。
 """
 from fastapi import APIRouter,Depends,HTTPException,status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from app.database import get_db
 from app.models import User
 from app.core.security import verify_password,create_token,decode_payload
@@ -18,6 +19,10 @@ from app.core.dep import oauth2_scheme
 from app.Schemas.register import RegisterBody
 import jwt
 import time
+import logging
+from redis.exceptions import RedisError
+
+logger=logging.getLogger(__name__)
 router=APIRouter()
 
 @router.post("/login")
@@ -38,19 +43,20 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 
 @router.post("/register",status_code=201)
 def register(body:RegisterBody,db:Session=Depends(get_db)):
-    """注册：昵称查重；account 的重复交给数据库唯一索引（撞了会 500，后面要改成 400）。
-
-    这里查重查的是 nickname，不是 account —— 因为 nickname 展示用、允许重名本来是设计，
-    但代码当前把它当唯一名用了。等做「账号唯一」时，这里要改成查 account，
-    并且捕获 IntegrityError 转成 400，别让唯一索引冲突冒成 500。
+    """注册：预查 account 是否被占用 → 400；并发下漏过去的由唯一索引兜底，
+    IntegrityError 同样转 400。nickname 只用于展示，允许重名。
     """
-    exists=db.scalar(select(User).where(User.account==body.username))
+    exists=db.scalar(select(User).where(User.account==body.account))
     if exists is not None:
-        raise HTTPException(status_code=400, detail="用户名已被占用")
+        raise HTTPException(status_code=400, detail="账号已被占用")
     # 密码只存哈希，绝不存明文
     user=User(nickname=body.username, password=hash_password(body.password),account=body.account,phone=body.phone,email=body.email)
     db.add(user)
-    db.commit()      # 写库
+    try:
+        db.commit()      # 写库
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="账号已被占用")
     db.refresh(user) # commit 后重新读一次，拿到自增 id
     return {"id": user.id, "username": user.nickname,"phone":user.phone,"email":user.email}
 # 登出：把 jti 存进 Redis 黑名单，TTL = token 剩余有效期
@@ -89,6 +95,11 @@ def logout(token: str = Depends(oauth2_scheme)):
     ttl = payload["exp"] - int(time.time())
 
     if ttl>0:
-        get_redis().set(f"blacklist:{payload['jti']}", 1, ex=ttl)
+        # 降级口径和 dep.py 一致：fail-open。Redis 挂了也不能让登出失败 ——
+        # 登不出去比「黑名单没写上」更难解释（token 到期自己就失效了）。
+        try:
+            get_redis().set(f"blacklist:{payload['jti']}", 1, ex=ttl)
+        except RedisError as e:
+            logger.warning("登出写入黑名单失败，按 fail-open 放行：%s", e)
 
     return {"detail": "已登出"}
